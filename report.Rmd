@@ -1,0 +1,954 @@
+---
+title: "Forecasting Air quality London Harlington"
+author: "Josué Cerpa Araña"
+date: "23 de mayo de 2019"
+output:
+  html_document: 
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r results='hide', message=FALSE, warning=FALSE,echo=FALSE}
+require(dplyr)
+require(MASS)
+library(data.table)
+library(lubridate)
+library(ggplot2)
+library(car)
+library(caret)
+library(worldmet)
+library(ropenaq)
+library(ggplot2)
+library(gridExtra)
+library(tidyverse)
+library(tidyr)
+library(leaps)
+library(rpart)
+library(GGally)
+```
+
+**IMPORTANT NOTE**: For this project we have used the ROPENAQ package. The API just gives us data from the last three months. In order to take more data, it was necessary to take it from Amazon (https://openaq-data.s3.amazonaws.com/index.html). This process was computationally expensive, so we upload here the workspace for knitting the markdown.
+
+```{r echo=TRUE}
+load("C:/ASIGNATURAS UC3M/FOURTH TERM/ADVANCED REGRESSION/8mayo.RData")
+```
+#GOAL
+
+The main goal of this project is to forescast the air quality in terms of meteorological data such as the wind speed,  wind direction, height 
+above the ground level, visiblity, air temperature, dew point, atmosphere pressure and relative humidity.
+
+For that we will use different statistical and machine learning tools. 
+
+#DATA SET WORLDMET API
+
+**API WORLDMET**: Functions to import data from more than 30,000 surface meteorological sites around the world managed by the National Oceanic and Atmospheric Administration (NOAA) Integrated Surface
+
+We look for the London Harlington's Location and we extract meteorological data. For this case, we have taken data from the year 2017 (hourly data). Also, it does not seem we have outliers:
+
+```{r}
+#AS WE HAVE UPLOADED THE FILE SINCE THE BEGINNING WE COMMENT THESE LINES IN ORDER TO AVOID 
+#A DELAY IN THE MARKDOWN
+
+#predictors <- importNOAA(code="037720-99999",year = 2017,precip=TRUE)
+#x=na.omit(dplyr::select(predictors,wd,ws,ceil_hgt,visibility,air_temp,
+#                 dew_point,atmos_pres,RH,date))
+```
+
+```{r}
+summary(x)
+```
+
+The next step is the study of the outliers, as we have 7653 observations, we decide to remove directly the outliers in order to avoid problems with the different methods applied subsequently.
+
+```{r}
+par(mfrow=c(2,4))
+boxplot(x$air_temp,main="Outliers air temperature")
+boxplot(x$dew_point,main="Outliers dew point")
+boxplot(x$atmos_pres,main="Outliers atmosphere pressure")
+boxplot(x$RH,main="Outliers relative humidity")
+boxplot(x$visibility,main="Outliers visibility") #No outliers
+boxplot(x$ceil_hgt,main="Outliers ceil_hgt") #No outliers
+boxplot(x$wd,main="Outliers wind direction")
+boxplot(x$ws,main="Outliers wind speed")
+```
+
+From the boxplots we realize that apart from visibility and ceil_hgt (height above ground level), the rest of the predictors have outliers (points outside Q3 + 1.5IQR). We remove them.
+
+```{r}
+outair=boxplot.stats(x$air_temp)$stats
+x=dplyr::filter(x,air_temp>outair[1] & air_temp<outair[5])
+
+outdew=boxplot.stats(x$dew_point)$stats
+x=dplyr::filter(x,dew_point>outdew[1] & dew_point<outdew[5])
+
+outatmos=boxplot.stats(x$atmos_pres)$stats
+x=dplyr::filter(x,atmos_pres>outatmos[1] & atmos_pres<outatmos[5])
+
+outrh=boxplot.stats(x$RH)$stats
+x=dplyr::filter(x,RH>outrh[1] & RH<outrh[5])
+
+outwd=boxplot.stats(x$wd)$stats
+x=dplyr::filter(x,wd>outwd[1] & wd<outwd[5])
+
+outws=boxplot.stats(x$ws)$stats
+x=dplyr::filter(x,ws>outws[1] & ws<outws[5])
+```
+
+
+#DATA SET ROPENAQ API
+
+**API ROPENAQ**: Air quality data from the API of the OpenAQ, using ropenaq package, any location.
+
+We take data from the same location of London and the same year. Also, we have hourly data.
+
+```{r}
+
+#AS WE HAVE UPLOADED THE FILE SINCE THE BEGINNING WE COMMENT THESE LINES IN ORDER TO AVOID 
+#A DELAY IN THE MARKDOWN
+
+#countries_table <- aq_countries()
+
+#GB:United kingdom / We choose London
+#cities<- aq_cities(country="GB") 
+
+#From the different locations we choose London Harlington (Row 8)
+#location=aq_locations(city = "London") 
+
+#from=date("2017-01-01")
+#to=date("2017-12-31")
+#dates=seq(from,to,1)
+#dates=as.character(dates)
+#pollutants=data.frame()
+#http="https://openaq-data.s3.amazonaws.com/"
+
+#for(i in 1:length(dates)){
+#  file=read.csv(paste0(http,dates[i],".csv"),stringsAsFactors = F)
+#  file=select(file,location,utc,parameter,value,latitude,longitude)
+#  file=filter(file,location=="London Harlington")
+#  file$utc=gsub("T"," ",file$utc)
+#  file$utc=substr(file$utc,1,19)
+#  file$utc=as.POSIXct(file$utc,tz="GMT")
+#  pollutants=rbind(pollutants,file)
+#}
+```
+
+```{r}
+head(pollutants)
+```
+
+We have as pollutants pm25, no2, o3 and pm10. Generally, we have measures for the contaminants the same days and the same hours, therefore, in order to have an index of the air quality we decide to group them by date and summarising the information using the mean. 
+
+```{r}
+head(airquality)
+```
+
+We do not have wrong values, thus the next step is to follow the same procedure as before. As we have enough observations (7465), we remove them directly.
+
+```{r}
+boxplot(airquality$value)
+outvalue=boxplot.stats(airquality$value)$stats
+airquality=dplyr::filter(airquality,value>outvalue[1] & value<outvalue[5])
+```
+
+#JOINING DATA SETS
+
+we merge the both data by date, for doing that, both sources need to have the same column name, therefore we have air quality and meteorological measures from the same location, same year and same hour. 
+
+```{r}
+colnames(airquality)[1]="date"
+conc=merge(airquality,x,by=c("date"),all = FALSE)
+head(conc)
+```
+
+We tried to work with this data, but we had much noise, so we decided to reduced the data set from hour to days, and we added an extra column called month in order to explain better our response. 
+
+```{r}
+conc$date=date(conc$date)
+conc=aggregate(.~ date, conc, mean)
+conc$date=factor(month(conc$date))
+colnames(conc)[1]=c("month")
+conc=dplyr::select(conc,2:ncol(conc),1)
+```
+
+Checking the data we realize both air temperature and dew point have negative values. Maybe, later we need to transformations, thus we decide to convert them from Celsius to Kelvin. 
+```{r}
+#dew point and air temp negative values, we convert them to kelvin
+conc$dew_point=conc$dew_point+273
+conc$air_temp=conc$air_temp+273
+head(conc)
+```
+
+Our final data is composed by 346 observations and nine predictors. 
+
+The next step is to split the data in training and testing, and proceeding with the descriptive analysis.
+
+#DESCRIPTIVE ANALYSIS
+
+```{r}
+#ALREADY DONE UPLOADING THE WORSKPACE
+# Split data into training and testing sets using the caret package
+#in_train <- createDataPartition(conc[,1], p = 0.8, list = FALSE)  # 80% for training
+#training <- conc[in_train,]
+#testing <- conc[-in_train,]
+```
+
+We plot the densities of the variables. Regarding the response, it should be centered, if not, we must apply some transformation. For the predictors, it is not necessary to apply any change, just in the case which we get a better relationship with our response. 
+
+
+
+```{r}
+#Air quality (response)
+plot9=ggplot(training, aes(value))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Air quality concentration")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  xlab("µg/m³")
+
+#wind direction (wd)
+plot1=ggplot(training, aes(wd))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Wind direction in degrees º")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#wind speed(ws)
+plot2=ggplot(training, aes(ws))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Wind speed in m/s")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#height above ground level (ceil_hgt)
+plot3=ggplot(training, aes(ceil_hgt))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Height above ground level")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Visibility 
+plot4=ggplot(training, aes(visibility))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Visibility in metres")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Relative humidity (RH)
+plot5=ggplot(training, aes(RH))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Relative humidity (%)")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Air temperature (air_temp)
+plot6=ggplot(training, aes(air_temp))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Air temperature in kelvin")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Dew point temperature (dew_point)
+plot7=ggplot(training, aes(dew_point))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Dew point in kelvin")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Atmosphere pressure (atmos_pres)
+plot8=ggplot(training, aes(atmos_pres))+
+  geom_density(color="darkblue",fill="lightblue")+
+  ggtitle("Sea level pressure in millibars")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(plot9,plot1,plot2,plot3,plot4,plot5,plot6,plot7,plot8,nrow = 3, ncol=3)
+```
+
+We realize that almost all the predictors are in a way centered, except height above ground level, and our response (air quality) does not need to be centered.
+
+Now, we do scatter plots of the predictors against our response in order to identify any useful pattern to include in our models. 
+
+```{r}
+plot10=ggplot(training,aes(month,value))+
+  geom_boxplot()+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("air quality (µg/m³)")+
+  xlab("months")
+
+plot11=ggplot(training,aes(wd,value))+
+  geom_point()+
+  ggtitle("Air quality-Wind Direction")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("wind direction (º)")
+
+plot12=ggplot(training,aes(ws,value))+
+  geom_point()+
+  ggtitle("Air quality- Wind speed")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("wind speed (m/s)")
+
+plot13=ggplot(training,aes(ceil_hgt,value))+
+  geom_point()+
+  ggtitle("Air quality - ceil_hgt")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("Height above ground level")
+
+plot14=ggplot(training,aes(visibility,value))+
+  geom_point()+
+  ggtitle("Air quality - visibility")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("Visibility (m)")
+
+plot15=ggplot(training,aes(air_temp,value))+
+  geom_point()+
+  ggtitle("Air quality - Air_temp")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("Air temperature (ºC)")
+
+plot16=ggplot(training,aes(dew_point,value))+
+  geom_point()+
+  ggtitle("Air quality - Dew_point")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Air quality (µg/m³)")+
+  xlab("Dew point temperature (ºC)")
+
+plot17=ggplot(training,aes(atmos_pres,value))+
+  geom_point()+
+  ggtitle("no2 - Atmos_pres")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("no2 (µg/m³)")+
+  xlab("Dew point temperature (ºC)")
+
+plot18=ggplot(training,aes(RH,value))+
+  geom_point()+
+  ggtitle("no2 - RH")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("no2 (µg/m³)")+
+  xlab("Relative humidity (%)")
+
+grid.arrange(plot10,plot11,plot12,plot13,plot14,plot15,plot16,plot17,plot18,nrow = 3, ncol=3)
+```
+
+Regarding the scatter plots we do not watch any clear pattern, and respect to the boxplot we can realize that there exists a "wave" relation with the air quality, so when we do the regression we should include lag 1 for the air quality as a predictor both training and testing set. As well, it is important to do a "pairs plot" for knowing if other predictors are correlated between them. 
+
+```{r}
+pairs(training)
+```
+
+We can see that air temperature and dew point are highly correlated, probably we should take that into account for creating the models.
+
+The last thing we do in regard to the descriptive analysis is the correlation between the predictors and our response:
+
+```{r}
+cor_value <- sort(cor(training[,1:9])["value",], decreasing = T)
+corr=data.frame(cor_value)
+ggplot(corr,aes(x = row.names(corr), y = cor_value)) + 
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  scale_x_discrete(limits= row.names(corr)) +
+  labs(x = "Predictors", y = "Air quality", title = "Correlations") + 
+  theme(plot.title = element_text(hjust = 0, size = rel(1.5)),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+#MODEL SELECTION
+
+In regard to the model selection, we take into account these four initial models, and we check the R squared and the residuals:
+
+$$value \sim .$$
+```{r}
+#All the variables
+linFit <- lm(value ~., data=training)
+summary(linFit)$r.squared 
+```
+
+$$value \sim wd+ws+ceil\_hgt+visibility+dew\_point*air\_temp+atmos\_pres+RH+month$$
+
+```{r}
+#All the variables but including air_temp*dew_point
+linFit <- lm(value ~wd+ws+ceil_hgt+visibility+dew_point*air_temp+atmos_pres+RH+month, data=training)
+summary(linFit)$r.squared
+```
+
+$$value \sim wd+ws+ceil\_hgt+visibility+air\_temp+air\_temp:dew\_point+atmos\_pres+RH+month$$
+```{r}
+#We remove dew_point but we add the interaction dew_point:air_temp
+linFit <- lm(value ~wd+ws+ceil_hgt+visibility+air_temp+air_temp:dew_point+atmos_pres+RH+month, data=training)
+summary(linFit)$r.squared
+```
+
+$$value ~wd+ws+ceil\_hgt+visibility+atmos\_pres+RH+month+air\_temp+air\_temp:dew\_point+lag1value$$
+```{r}
+#We add lag1 of the response (we appreciate a patten in boxplot month-value)
+linFit <- lm(value ~wd+ws+ceil_hgt+visibility+atmos_pres+RH+month+air_temp+air_temp:dew_point+lag(value), data=training)
+summary(linFit) #R^2 0.7115
+par(mfrow=c(2,2))
+plot(linFit, pch=23 ,bg='orange',cex=2)
+
+#Including lag1 of air quality in the training and testing
+training = training %>% dplyr::mutate(lag1value=lag(value)) %>% drop_na()
+testing = testing %>% dplyr::mutate(lag1value=lag(value)) %>% drop_na()
+```
+
+For the three first ones, we get $R^2$ of 0.618, 0.6212, 0.620. In the last one we obtain and R squared of 0.7115 which is much better and the residuals satisfy the condition of constant mean, variance and normality. The cook distance is not so good because the residuals are not sticked to the "y" axis.
+
+After the model selection we apply the library leap so as to know if we can simplify the model:
+
+```{r}
+mod0=value ~.
+mod1=value ~wd+ws+ceil_hgt+visibility+air_temp+air_temp:dew_point+atmos_pres+RH+month
+mod2=value ~wd+ws+ceil_hgt+visibility+atmos_pres+RH+month+air_temp+air_temp:dew_point+lag1value
+
+exhaustive <- regsubsets(mod2, data=training)
+summary(exhaustive)
+par(mfrow=c(1,1))
+plot(summary(exhaustive)$bic, type = 'l')
+```
+
+In order to predict better we need 8 predictors
+
+#STATISTICAL LEARNING TOOLS WITH CARET PACKAGE
+
+For this project we are going to use 2 repeats of 10-fold cross validation
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10, repeats = 2)
+test_results <- data.frame(value = testing$value)
+measurements=data.frame()
+```
+
+##LINEAR REGRESSION
+
+The target, air quality, is a continuous variable that depends linearly on predictors.Moreover, linear regression can deal with interactions and non-linearities.
+
+Estimation is based on least squares: the loss function is the sum of residual squares (training prediction error)
+
+$$model = \beta_{0}+\beta_{1}X_{i1}+...+\beta_{p}X_{ip}+\epsilon$$
+
+Assumptions:
+
+  -Linearity: The mean of the response, is a linear function of the predictors(X)
+  
+  -Independence: The errors, $\epsilon_i$, are independent
+  
+  -Homocedasticity: The variance of the errors, $\epsilon_i$, at each value of the predictor, xi, is constant.
+  
+  -Normality: The errors, $\epsilon_i$, are Normally distributed
+
+We applied the linear regression and we get that the best model in terms of lowest RMSE and highest R squared is:
+
+$$mod2=value \sim wd+ws+ceil\_hgt+visibility+atmos\_pres+RH+month+air\_temp+air\_temp:dew\_point+lag1value$$
+```{r}
+mod2lm_tune <- train(mod2, data = training, 
+                     method = "lm", 
+                     preProc=c('scale', 'center'),
+                     trControl = ctrl)
+mod2lm_tune
+test_results$mod2lm <- predict(mod2lm_tune, testing)
+postResample(pred = test_results$mod2lm,  obs = test_results$value)
+lm=postResample(pred = test_results$mod2lm,  obs = test_results$value)
+measurements=rbind(measurements,lm)
+qplot(test_results$mod2lm, test_results$value) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(-20,40), y = c(-20, 40)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+We have bias and variance. 
+
+##FORWARD REGRESSION
+
+The procedure of this method is to add one predictor each time, and select that with best fit. Compute the corresponding criterion for
+the best fit.
+
+Regarding the nvmax, the maximum of this parameter is computed summing the number of predictors, plus the total levels of the factor variable, plus 1.
+```{r}
+for_tune <- train(mod2, data = training, 
+                  method = "leapForward", #instead of original package 
+                  preProc=c('scale', 'center'),
+                  tuneGrid = expand.grid(nvmax = 2:21),
+                  trControl = ctrl)
+for_tune
+plot(for_tune)
+# which variables are selected?
+coef(for_tune$finalModel, for_tune$bestTune$nvmax)
+test_results$frw <- predict(for_tune, testing)
+postResample(pred = test_results$frw,  obs = test_results$value)
+frwp=postResample(pred = test_results$frw,  obs = test_results$value)
+measurements=rbind(measurements,frwp)
+qplot(test_results$frw, test_results$value) + 
+  labs(title="Forward Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(-20,40), y = c(-20, 40))+
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+Very similar to lm 
+
+##BACKWARD REGRESSION
+
+The procedure is to start with the full model and remove one predictor each time, and select that with best fit in this case usign the CV criteria. 
+
+```{r}
+back_tune <- train(mod2, data = training, 
+                   method = "leapBackward", #backward regression in pack. leap
+                   preProc=c('scale', 'center'),
+                   tuneGrid = expand.grid(nvmax = 2:21),
+                   trControl = ctrl)
+back_tune
+plot(back_tune)
+# which variables are selected? 
+coef(back_tune$finalModel, back_tune$bestTune$nvmax)
+test_results$bw <- predict(back_tune, testing)
+postResample(pred = test_results$bw,  obs = test_results$value)
+bwp=postResample(pred = test_results$bw,  obs = test_results$value)
+measurements=rbind(measurements,bwp)
+
+qplot(test_results$bw, test_results$value) + 
+  labs(title="Backward Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(-20,40), y = c(-20, 40))+
+  geom_abline(intercept = 0, slope = 1, colour = "blue")+
+  theme_bw()
+```
+
+##STEPWISE REGRESSION
+
+Variables are added and removed to the model sequentially. It is a hybrid method between forward and backward selection. 
+
+```{r}
+# Stepwise regression
+step_tune <- train(mod2, data = training, 
+                   method = "leapSeq", 
+                   preProc=c('scale', 'center'),
+                   tuneGrid = expand.grid(nvmax = 2:21),
+                   trControl = ctrl)
+plot(step_tune)
+
+# which variables are selected?(wd,ws,ceil_hgt,visibility,air_temp)
+coef(step_tune$finalModel, step_tune$bestTune$nvmax)
+test_results$seq <- predict(step_tune, testing)
+seqp=postResample(pred = test_results$seq,  obs = test_results$value)
+measurements=rbind(measurements,seqp)
+
+qplot(test_results$seq, test_results$value) + 
+  labs(title="Stepwise regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(-20,40), y = c(-20, 40)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue")+
+  theme_bw()
+```
+
+Very similar to lm 
+
+##RIDGE REGRESSION
+
+Ridge Regression is a technique for analyzing multiple regression data that suffer from multicollinearity. When
+multicollinearity occurs, least squares estimates are unbiased, but their variances are large so they may be far from
+the true value. By adding a degree of bias to the regression estimates, ridge regression reduces the standard errors. 
+
+$$minimize ||y-X \beta||^2 _2 + \rho ||\beta||^2_2$$
+where $\rho$ is a tuning parameter, to be calibrated separately.
+
+We get that $\lambda$ is zero, therefore the output are in way similar to lm.
+
+```{r}
+ridge_grid <- expand.grid(lambda = seq(0, .1, length = 20))
+ridge_tune <- train(mod2, data = training,
+                    method='ridge',
+                    preProc=c('scale','center'),
+                    tuneGrid = ridge_grid,
+                    trControl=ctrl)
+plot(ridge_tune)
+ridge_tune$bestTune
+test_results$ridge <- predict(ridge_tune, testing)
+postResample(pred = test_results$ridge,  obs = test_results$value)
+ridgep=postResample(pred = test_results$ridge,  obs = test_results$value)
+measurements=rbind(measurements,ridgep)
+```
+
+##LASSO
+
+Regression analysis method that performs both variable selection and regularization in order to enhance the prediction accuracy and interpretability of the statistical model it produces. 
+
+$$minimize_\beta \frac{1}{2}||y-X\beta||^2_2 +\rho ||\beta||_1$$
+We get that $\lambda$ is 0.895, therefore the output are in way similar to lm.
+```{r}
+lasso_grid <- expand.grid(fraction = seq(.01, 1, length = 20))
+lasso_tune <- train(mod2, data = training,
+                    method='lasso',
+                    preProc=c('scale','center'),
+                    tuneGrid = lasso_grid,
+                    trControl=ctrl)
+#rho for lasso around 0.2
+plot(lasso_tune)
+lasso_tune$bestTune
+test_results$lasso <- predict(lasso_tune, testing)
+postResample(pred = test_results$lasso,  obs = test_results$value)
+lassop=postResample(pred = test_results$lasso,  obs = test_results$value)
+measurements=rbind(measurements,lassop)
+```
+
+##ELASTIC REGRESSION
+
+Regularized regression method that linearly combines penalties of the lasso and ridge methods.
+
+$$minimize_\beta \frac{1}{2}||y-X\beta||^2_2 +\alpha(1-\rho)||\beta||^2_2 $$
+The penalization term is lambda zero and alpha 0.2.
+
+```{r}
+elastic_grid = expand.grid(alpha = seq(0, .2, 0.01), lambda = seq(0, .1, 0.01)) 
+glmnet_tune <- train(mod2, data = training,
+                     method='glmnet',
+                     preProc=c('scale','center'),
+                     tuneGrid = elastic_grid,
+                     trControl=ctrl)
+plot(glmnet_tune)
+glmnet_tune$bestTune
+test_results$glmnet <- predict(glmnet_tune, testing)
+postResample(pred = test_results$glmnet,  obs = test_results$value)
+elanetp=postResample(pred = test_results$glmnet,  obs = test_results$value)
+measurements=rbind(measurements,elanetp)
+```
+
+## PRINCIPAL COMPONENTS REGRESSION
+
+The approach is to reduce the dimension in X using just a few PCs, and then perform the regression.
+
+```{r}
+pcr_tune <- train(mod2, data = training,
+                  method='pcr',
+                  preProc=c('scale','center'),
+                  tuneGrid = expand.grid(ncomp = 2:10),
+                  trControl=ctrl)
+plot(pcr_tune)
+test_results$pcr <- predict(pcr_tune, testing)
+postResample(pred = test_results$pcr,  obs = test_results$value)
+pcrp=postResample(pred = test_results$pcr,  obs = test_results$value)
+measurements=rbind(measurements,pcrp)
+```
+
+## PARTIAL LEAST SQUARES
+
+Similar in spirit to PCR but PLS also looks for linear combinations of the predictors, but using y in addition to X to find the
+optimal combination. 
+
+```{r}
+pls_tune <- train(mod2, data = training,
+                  method='pls',
+                  preProc=c('scale','center'),
+                  tuneGrid = expand.grid(ncomp = 2:10),
+                  trControl=ctrl)
+plot(pls_tune)
+test_results$pls <- predict(pls_tune, testing)
+postResample(pred = test_results$pls,  obs = test_results$value)
+plsp=postResample(pred = test_results$pls,  obs = test_results$value)
+measurements=rbind(measurements,plsp)
+```
+
+##ROBUST REGRESSION
+
+Regression analysis seeks to find the relationship between one or more independent variables and a dependent variable. Certain widely used methods of regression, such as ordinary least squares, have favourable properties if their underlying assumptions are true, but can give misleading results if those assumptions are not true; thus ordinary least squares is said to be not robust to violations of its assumptions. Robust regression methods are designed to be not overly affected by violations of assumptions by the underlying data-generating process.4
+
+$$minimize_\beta \sum_{i} \rho \left( \frac{y_i -F_i(\beta ; x_i)}{\sigma_i} \right) $$
+```{r}
+linfit.huber <- rlm(mod2, data=training, psi=psi.huber)
+summary(linfit.huber)
+test_results$robust <- predict(linfit.huber, testing)
+postResample(pred = test_results$robust,  obs = test_results$value)
+robustp=postResample(pred = test_results$robust,  obs = test_results$value)
+measurements=rbind(measurements,robustp)
+```
+
+#SUMMARY STATISTICAL TOOLS
+
+At the table of below we can see the different measures for the different statistical tools. 
+
+```{r}
+colnames(measurements)=c("MSRE","Rsquared","MAE")
+rownames(measurements)=c("lm","frw","bw","stw","ridge","lasso","elasnet","PCR","PLS","robust")
+measurements
+```
+
+What method has the lowest RMSE? 
+
+```{r}
+measurements[which.min(measurements[,1]),]
+```
+
+What method has the lowest MAE?
+
+```{r}
+measurements[which.min(measurements[,3]),]
+```
+
+What method has the highest R squared?
+
+```{r}
+measurements[which.max(measurements[,2]),]
+```
+
+The backward selection method has lowest RMSE and the highest R squared, therefore we take it as the model for doing our interval predictions. 
+
+#INTERVAL PREDICTIONS FOR THE BEST STATISTICAL LEARNING TOOL
+
+
+```{r}
+# Final predictions:
+yhat = test_results$bw
+hist(yhat, col="lightblue")
+
+y = test_results$value
+error = y-yhat
+hist(error, col="lightblue")
+
+noise = error[1:30]
+sd.noise = sd(noise)
+
+# If noise is a normal variable, then a 90%-CI can be computed as
+lwr = yhat[31:length(yhat)] - 1.65*sd.noise
+upr = yhat[31:length(yhat)] + 1.65*sd.noise
+
+predictions = data.frame(real=y[31:length(y)], fit=yhat[31:length(yhat)], lwr=lwr, upr=upr)
+predictions = predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+```
+
+Predictions outside of the interval (over 1)
+```{r}
+mean(predictions$out==1)
+```
+
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+theme_minimal()+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  lims(x = c(10.5,30), y = c(-20, 40)) +
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Prediction intervals 90%-CI with Backward method", x = "prediction",y="Real value")
+```
+
+#MACHINE LEARNING TOOLS 
+
+##K-nearest neighbours
+
+K nearest neighbors is a simple algorithm that stores all available cases and predict the numerical target based on a similarity measure.
+
+```{r}
+measurements2=data.frame()
+
+#knn 
+# Automatic optimization of hyper-parameter k with Caret:
+modelLookup('kknn')
+knn_tune <- train(mod2, data = training,
+                  method = "kknn",   
+                  preProc=c('scale','center'),
+                  tuneLength = 10,
+                  trControl = ctrl)
+plot(knn_tune)
+test_results$knn <- predict(knn_tune, testing)
+postResample(pred = test_results$knn,  obs = test_results$value)
+neighbours=postResample(pred = test_results$knn,  obs = test_results$value)
+measurements2=rbind(measurements2,neighbours)
+```
+
+##SUPPORT VECTOR REGRESSION
+
+The objective of the support vector machine algorithm is to find a hyperplane in an N-dimensional space(N-the number of features) that distinctly classifies the data points.
+
+Support Vector Regression (SVR) works on similar principles as Support Vector Machine (SVM) classification. One can say that SVR is the adapted form of SVM when the dependent variable is numerical rather than categorical.
+
+```{r}
+modelLookup('svmRadial')
+svm_tune <- train(mod2, data = training,
+                  method = "svmRadial",
+                  tuneGrid = data.frame(.C = seq(.1, 2, 0.1), .sigma = seq(0.01, 0.05, 0.01)), 
+                  preProc=c('scale','center'),
+                  trControl = ctrl)
+plot(svm_tune)
+test_results$svmR <- predict(svm_tune, testing)
+postResample(pred = test_results$svmR,  obs = test_results$value)
+svm=postResample(pred = test_results$svmR,  obs = test_results$value)
+measurements2=rbind(measurements2,svm)
+```
+
+##DECISION TREES
+
+A decision tree is a decision support tool that uses a tree-like model of decisions and their possible consequences, including chance event outcomes, resource costs, and utility. It is one way to display an algorithm that only contains conditional control statements.
+
+```{r}
+# Trees cannot handle interaction terms directly (dew_point:air_temp)
+training$dewair = training$air_temp*training$dew_point
+testing$dewair = testing$air_temp*testing$dew_point
+
+ModelTree = value ~ wd+ws+ceil_hgt+visibility+atmos_pres+RH+month+dewair+lag1value
+rpart.fit <- rpart(ModelTree, data = training)
+summary(rpart.fit)
+
+test_results$tree <- predict(rpart.fit, testing)
+postResample(pred = test_results$tree,  obs=test_results$value)
+dt=postResample(pred = test_results$tree,  obs=test_results$value)
+measurements2=rbind(measurements2,dt)
+```
+
+
+##RANDOM FOREST
+
+Random forests or random decision forests are an ensemble learning method for classification, regression and other tasks that operates by constructing a multitude of decision trees at training time and outputting the class that is the mode of the classes (classification) or mean prediction (regression) of the individual trees
+
+```{r}
+# easy to tune
+rf_tune <- train(mod2, data = training,
+                 method = "rf",
+                 preProc=c('scale','center'),
+                 trControl = ctrl,
+                 ntree = 250,
+                 tuneGrid = expand.grid(mtry = c(10,20,30)), 
+                 verbose = FALSE,
+                 warning=FALSE)
+plot(rf_tune)
+test_results$rf <- predict(rf_tune, testing)
+postResample(pred = test_results$rf,  obs = test_results$value)
+rf=postResample(pred = test_results$rf,  obs = test_results$value)
+measurements2=rbind(measurements2,dt)
+```
+
+##GRADIENT BOOSTING
+
+Gradient boosting fits generalized boosted regression models
+
+```{r}
+gbmGrid<-expand.grid(n.trees=seq(100,400,by=100),interaction.depth=seq(1,4,by=1),shrinkage=c(.001,.01,.1), n.minobsinnode=10)
+gbm_tune <- train(mod2, data = training,
+                  method = "gbm", # Generalized Boosted Regression Models
+                  preProc=c('scale','center'),
+                  tuneGrid = gbmGrid,
+                  trControl = ctrl, 
+                  verbose = FALSE)
+plot(gbm_tune)
+test_results$gbm <- predict(gbm_tune, testing)
+postResample(pred = test_results$gbm,  obs = test_results$value)
+gb=postResample(pred = test_results$gbm,  obs = test_results$value)
+measurements2=rbind(measurements2,gb)
+
+qplot(test_results$gbm, test_results$value) + 
+  labs(title="Gradient Boosting Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(-20,40), y = c(-20, 40))+
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+#COMBINING MODELS 
+
+All the models have high correlations between them:
+
+```{r}
+test_results %>%
+  dplyr::select(-value) %>%
+  ggcorr(palette = "RdBu", label = TRUE) + labs(title = "Correlations between different models")
+```
+
+Performance of the methods in terms of correlation:
+
+```{r}
+sort(apply(test_results[-1], 2, function(x) cor(x,test_results$value)^2))
+```
+
+Performance of the methos in terms of the prediction error:
+
+```{r}
+sort(apply(test_results[-1], 2, function(x) mean(abs(x - test_results$value))))
+```
+
+Taking the mean error criteria we combine the knn, svmR and robust because they have the lowest errors:
+
+```{r}
+test_results$comb = (test_results$svmR + test_results$knn + test_results$robust)/3
+coef(step_tune$finalModel, step_tune$bestTune$nvmax)
+postResample(pred = test_results$comb,  obs = test_results$value)
+combination=postResample(pred = test_results$comb,  obs = test_results$value)
+measurements2=rbind(measurements2,combination)
+```
+
+#SUMMARY MACHINE LEARNING MODELS 
+
+```{r}
+colnames(measurements2)=c("MSRE","Rsquared","MAE")
+rownames(measurements2)=c("knn","svm","dtree","rforest","gradboost","knn+svm+robust")
+measurements2
+```
+
+What method has the lowest RMSE? 
+
+```{r}
+measurements2[which.min(measurements2[,1]),]
+```
+
+What method has the lowest MAE?
+
+```{r}
+measurements2[which.min(measurements2[,3]),]
+```
+
+What method has the highest R squared?
+
+```{r}
+measurements2[which.max(measurements2[,2]),]
+```
+
+#BEST MODEL 
+
+Now we know the best model of statistical and machine learning we compare them in order to know what is the best in terms of the RMSE criteria:
+
+```{r}
+measurements[which.min(measurements[,1]),]
+measurements2[which.min(measurements2[,1]),]
+```
+
+
+We can realize that the combination of the k-nearest neighbours, support vector regression and robust regression has better results for R squared, RMSE and MAE, therefore, that is the model we take. 
+
+## PREDICTION INTERVALS FOR THE BEST MODEL 
+
+```{r}
+# Final predictions:
+yhat = test_results$comb
+hist(yhat, col="lightblue")
+```
+
+```{r}
+y = test_results$value
+error = y-yhat
+hist(error, col="lightblue")
+```
+
+```{r}
+noise = error[1:30]
+sd.noise = sd(noise)
+
+# If noise is a normal variable, then a 90%-CI can be computed as
+lwr = yhat[31:length(yhat)] - 1.65*sd.noise
+upr = yhat[31:length(yhat)] + 1.65*sd.noise
+
+predictions = data.frame(real=y[31:length(y)], fit=yhat[31:length(yhat)], lwr=lwr, upr=upr)
+predictions = predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+```
+
+Predictions outside of the interval (over 1)
+
+```{r}
+mean(predictions$out==1)
+```
+
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+theme_minimal()+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  lims(x = c(10.5,30), y = c(-20, 40)) +
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Prediction intervals 90%-CI with combination knn+svmr+robust", x = "prediction",y="Real value")
+```
+
+#CONCLUSIONS
+
+Checking the results we can realize that with the machine learning tools we predict better because generally, these models have the highest R squared and lowest RMSE . However, with the statistical tools we improve improve the interpretability, but somehow we loss a bit of predicting power. 
+
+
+
+
